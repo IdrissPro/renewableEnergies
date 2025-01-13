@@ -1,0 +1,560 @@
+
+
+    
+---
+editor_options:
+  markdown:
+    wrap: 72
+title: "Les relations des pays du monde aux énergies "
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo= FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(plotly)
+library(rworldmap)
+library(kableExtra)
+library(corrplot)
+library(countrycode)
+library(readr)
+library(sf)
+library(tibble)
+library(knitr)
+library(reshape2)
+library(lmtest)
+library(ggfortify)
+```
+Ce Markdown a pour but de présenter les différentes illustrations et modèles développés. Les analyses et interprétations sont disponibles dans la notice.
+
+
+## PARTIE 1: ACQUISITION DES DONNEES:
+
+Dans cette partie, on s'occupe de réucpérer les données sous format brut et d'appliquer une série de transformations (nettoyage,suppression de colonnes, ajout de colonnes)
+
+```{r}
+# 1. Acquisition des données
+# Charger le dataset (exemple avec un fichier CSV)
+dataset <- read.csv("./global-data-on-sustainable-energy.csv", stringsAsFactors = FALSE)
+
+# Sauvegarder l'état original du dataset
+dataset_original <- dataset
+
+# Suppression des colonnes avec trop de NA
+dataset <- dataset %>% select(-Renewables....equivalent.primary.energy., -Renewable.electricity.generating.capacity.per.capita)
+
+#Suppression des colonnes inutilisées
+dataset <- dataset %>% 
+  select(-Density.n.P.Km2. ,-Land.Area.Km2. ,-Latitude,-Longitude)
+
+# On remplace les valeurs manquantes par la moyenne par pays (pour ne pas perdre trop de données)
+dataset <- dataset %>% group_by(Entity) %>%
+  mutate(across(
+    .cols = where(is.numeric),
+    .fns = ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)
+  )) %>%
+  ungroup()
+
+# Remplacer les NA dans la colonne "Financial.flows.to.developing.countries..US..." par 0
+dataset$Financial.flows.to.developing.countries..US...[is.na(dataset$Financial.flows.to.developing.countries..US...)] <- 0
+
+# Supprimer les NA restants éventuels
+dataset <- dataset %>%
+  drop_na()
+
+# Ajouter une colonne des continents car on en aura besoin plus tard
+dataset$Continent <- countrycode(dataset$Entity, origin = "country.name", destination = "continent")
+
+kable(head(dataset), caption = "Premières lignes du dataset formaté")
+```
+
+## PARTIE 2: L'ACCES AUX ENERGIES DANS DIFFERENTS PAYS
+
+Dans cette partie, nous nous focaliserons sur l'étude de l'accès aux énergies renouvelables dans différents pays
+
+### 2.1 : Relation PIB/Accès à l'électricité
+
+L'objectif ici va être de tracer un nuage de points pour vérifier notre intuitition de cette relation, puis d'effectuer un test d'ANOVA sur un modèle pour valider cette intuition
+
+Nous avons le tracé du nuage de points suivant:
+```{r}
+# Filtrer pour réaliser la moyenne sur les années par pays de manière à obtenir un point par pays dans le graphe
+dataset_points <- dataset %>%
+  group_by(Entity) %>%
+  summarise(
+    Access = mean(Access.to.electricity....of.population., na.rm = TRUE),
+    GDP_per_capita = mean(gdp_per_capita, na.rm = TRUE),
+    GDP_growth = mean(gdp_growth, na.rm = TRUE)
+  )
+
+# Nuage de points 3D
+fig <- plot_ly(
+  data = dataset_points,
+  x = ~GDP_per_capita,
+  y = ~GDP_growth,
+  z = ~Access,
+  text = ~Entity,
+  type = "scatter3d",
+  mode = "markers",
+  marker = list(size = 5, color = ~Access, colorscale = "Viridis")
+)
+
+fig <- fig %>%
+  layout(
+    title = "Nuage de points 3D : Access to Electricity vs GDP",
+    scene = list(
+      xaxis = list(title = "GDP per Capita"),
+      yaxis = list(title = "GDP Growth"),
+      zaxis = list(title = "Access to Electricity")
+    )
+  )
+
+fig
+```
+
+Les modèles intervenant dans le test d'ANOVA sont les modèles Modèle 1 ANOVA  : Access.to.electricity....of.population. ~ Entity + Year + gdp_per_capita et Modèle 2 ANOVA : Access.to.electricity....of.population. ~ Entity + Year + gdp_per_capita + gdp_growth. 
+
+```{r}
+
+# Nous extrayon ici et affichons les résultats d'ANOVA avec R² ajusté
+create_anova_table <- function(model, title_prefix) {
+  # Résumé du modèle
+  model_summary <- summary(model)
+  
+  # R² ajusté
+  r2_adjusted <- round(1 - (model_summary[[1]]$`Sum Sq`[length(model_summary[[1]]$`Sum Sq`)] / sum(model_summary[[1]]$`Sum Sq`)), 4)
+  
+  # Résultats formatés
+  anova_table <- data.frame(
+    Source = rownames(model_summary[[1]]),
+    Df = model_summary[[1]]$Df,
+    Sum_Sq = round(model_summary[[1]]$`Sum Sq`, 2),
+    Mean_Sq = round(model_summary[[1]]$`Mean Sq`, 2),
+    F_value = round(model_summary[[1]]$`F value`, 2),
+    P_value = signif(model_summary[[1]]$`Pr(>F)`, 4)
+  )
+  
+  # Création du tableau récapitulatif
+  kable(anova_table, caption = paste0(title_prefix, " | R² ajusté : ", r2_adjusted), col.names = c("Source", "ddl", "Sommes carrés", "Moyennes carrés", "F-value", "P-value")) %>%
+    kable_styling(bootstrap_options = c("striped", "hover"))
+}
+
+# Modèle 1 ANOVA 
+anova_model1 <- aov(Access.to.electricity....of.population. ~ Entity + Year + gdp_per_capita, data = dataset)
+create_anova_table(anova_model1, "Modèle 1 ANOVA  : Access.to.electricity....of.population. ~ Entity + Year + gdp_per_capita")
+
+# Modèle 2 ANOVA 
+anova_model2 <- aov(Access.to.electricity....of.population. ~ Entity + Year + gdp_per_capita + gdp_growth, data = dataset)
+create_anova_table(anova_model2, "Modèle 2 ANOVA : Access.to.electricity....of.population. ~ Entity + Year + gdp_per_capita + gdp_growth")
+
+
+```
+
+### 2.2 : Disparités dans l'accès aux énergies propres pour la cuisine entre continents
+
+L'objectif ici va être d'utiliser un violin plot pour visualiser les écarts inter et intra continents dans la moyenne sur les années 2000 à 2019 dans l'accès aux énergies propres pour la cuisine
+
+```{r}
+# Calcul de la moyenne de la colonne "Access.to.clean.fuels.for.cooking" par pays
+moyenne_clean_cooking_by_country <- dataset %>%
+  group_by(Entity,Continent) %>%
+  summarise(
+    Mean_Clean_Cooking = mean(Access.to.clean.fuels.for.cooking, na.rm = TRUE)
+  )
+```
+
+```{r}
+# Création du violin plot
+
+ggplot(moyenne_clean_cooking_by_country, aes(x = Continent, y = Mean_Clean_Cooking, fill = Continent)) +
+  geom_violin(trim = FALSE) +  # Violin plot
+  geom_boxplot(width = 0.1, color = "black", alpha = 0.7) +  # Ajouter un boxplot pour plus de clarté
+  labs(
+    x = "Continent",
+    y = "Proportion moyenne d'accès aux combustibles propres (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 16, face = "bold"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "none"
+  )
+
+
+```
+
+
+### 2.3 : Analyse de l'évolution de la consommation moyenne par zone
+
+Nous pouvons également partitionner les pays en trois groupes selon qu'ils consomment beaucoup, moyennement ou peu d'énergie (par kmeans) puis voir comment évolue la part des énergies renouvelables dans la consommation totale d'énergie en fonction du temps pour repérer des pays à surveiller (énergivores et très dépendants des énergies non renouvelables, donc périssables) à l'aide d'un graphe par groupe
+
+```{r}
+
+# Calcul de la consommation moyenne par pays
+country_means <- dataset %>%
+  group_by(Entity) %>%
+  summarise(Mean_Consumption = mean(Primary.energy.consumption.per.capita..kWh.person., na.rm = TRUE))
+
+# Clustering en 3 groupes (méthode K-Means)
+set.seed(42)
+kmeans_result <- kmeans(country_means$Mean_Consumption, centers = 3)
+
+# Ajout des groupes au dataset country_means
+country_means <- country_means %>%
+  mutate(Groupe_Conso = as.factor(kmeans_result$cluster))
+
+dataset <- dataset %>%
+  left_join(country_means %>% select(Entity, Groupe_Conso), by = "Entity")
+
+# Calcul des max pour chaque groupe afin de labéliser chaque groupe (groupe 1: Faible conso donc a le plus petit maximum des trois groupes, groupe 2: Conso intermédiaire donc a le deuxième maximum le plus élevé et groupe 3: Conso haute donc a le maximum le plus élevé des trois groupes)
+
+group_labels <- country_means %>%
+  group_by(Groupe_Conso) %>%
+  summarise(Max_Consumption = max(Mean_Consumption)) %>%
+  arrange(Max_Consumption) %>%
+  mutate(Label = case_when(
+    row_number() == 1 ~ "Faible Conso",
+    row_number() == 2 ~ "Moyenne Conso",
+    row_number() == 3 ~ "Haute Conso"
+  ))
+
+# Ajout des labels dans le dataset country_means et dans le dataset original
+country_means <- country_means %>%
+  left_join(group_labels %>% select(Groupe_Conso, Label), by = "Groupe_Conso")
+
+dataset <- dataset %>%
+  left_join(country_means %>% select(Entity, Label), by = "Entity")
+
+```
+
+On souhaite tracer uniquement 7 pays maximum par groupe pour des raisons de lisibilité
+
+```{r}
+# Fonction pour tracer les graphes par groupe (7 pays max)
+plot_group <- function(label) {
+  group_data <- dataset %>%
+    filter(Label == label) %>%
+    group_by(Entity) %>%
+    summarise(Count = n()) %>%
+    slice_head(n = 7) %>% 
+    left_join(dataset, by = "Entity")
+  
+  # On crée le graphe
+  ggplot(
+    group_data,
+    aes(x = Year, y = Renewable.energy.share.in.the.total.final.energy.consumption...., color = Entity)
+  ) +
+    geom_line() + 
+    labs(
+      title = paste("Part des énergies renouvelables -", label),
+      x = "Année",
+      y = "Part des énergies renouvelables (%)",
+      color = "Pays"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(hjust = 0.5),  
+      legend.position = "right"  
+    )
+}
+
+# Plot pour chaque groupe
+plot_group("Faible Conso")
+plot_group("Moyenne Conso")
+plot_group("Haute Conso")
+
+
+```
+
+## PARTIE 3: L'IMPACT ENERGETIQUE DES DIFFERENTS PAYS DANS LE MONDE:
+
+### 3.1: Intensité énergétique par pays
+
+Ici, nous réalisons la carte choroplèthe de l'intensité énergétique en fonction des pays en 2019: 
+
+```{r}
+année <- 2019  
+
+# On sélectionne les données pour l'année choisie (mise à 2019 car 2020 contenanit beaucoup d'information manquantes)
+intensity_data <- dataset %>%
+  filter(Year == année) %>%
+  select(Entity, Energy.intensity.level.of.primary.energy..MJ..2017.PPP.GDP.)
+
+world_map <- getMap()
+
+# Fusionner les données d'intensité énergétique avec la carte
+merged_data <- joinCountryData2Map(intensity_data, joinCode = "NAME", nameJoinColumn = "Entity")
+
+# Créer la carte choroplèthe
+mapCountryData(merged_data, nameColumnToPlot = "Energy.intensity.level.of.primary.energy..MJ..2017.PPP.GDP.",
+               mapTitle = paste("Carte choroplèthe de l'intensité énergétique par pays en", année),
+               colourPalette = "viridis",  
+               oceanCol = "lightblue", # Couleur de l'océan
+               missingCountryCol = "white") #Pour remplir les pays manquants en blanc   
+
+```
+
+Nous pouvons également nous appuyer sur une Heatmap pour analyser l'évolution au fil des années de l'intensité énergétique par pays:
+
+```{r}
+
+# On calcule les 40 pays avec l'intensité énergétique la plus élevée en 2019
+top_40_countries <- dataset %>%
+  filter(Year == 2019) %>% 
+  arrange(desc(Energy.intensity.level.of.primary.energy..MJ..2017.PPP.GDP.)) %>% # Trier par intensité énergétique décroissante
+  slice_head(n = 40) %>% # Extraire les 40 premières lignes
+  pull(Entity)  
+
+# On filtre le dataset pour ces 40 pays
+dataset_filtered <- dataset %>%
+  filter(Entity %in% top_40_countries)
+
+# On crée la heatmap avec un dégradé rouge-jaune
+ggplot(dataset_filtered, aes(x = factor(Year), y = Entity, fill = Energy.intensity.level.of.primary.energy..MJ..2017.PPP.GDP.)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = c("yellow", "red", "darkred")) + 
+  labs(
+    title = "Heatmap de l'intensité énergétique (Top 40 pays)",
+    x = "Année",
+    y = "Pays",
+    fill = "Intensité énergétique"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  
+
+
+
+```
+
+### 3.2 Comment expliquer les émissions de CO2 des différents pays ?
+
+Nous allons réaliser ici un modèle linéaire afin d'essayer d'expliquer les émissions de CO2 par plusieurs variables:
+
+```{r}
+
+##Dans cette partie, on prétraite les données avant de les fournir au modèle (standardisation, conversion des colonnes aux mêmes unités, suppression des outliers par Z score et distance de Cook)
+
+# Filtrer les données pour garder les variables nécessaires
+mlg_data <- dataset %>%
+  select(
+    CO2_Emissions = Value_co2_emissions_kt_by_country,
+    Energy_Intensity = Energy.intensity.level.of.primary.energy..MJ..2017.PPP.GDP.,
+    Primary_Energy = Primary.energy.consumption.per.capita..kWh.person.,
+    Renewable_Share = Renewable.energy.share.in.the.total.final.energy.consumption....,
+    GDP_per_Capita = gdp_per_capita,
+    Low_Carbon_Electricity = Low.carbon.electricity....electricity.,
+    Fossil_Fuel_Electricity = Electricity.from.fossil.fuels..TWh.
+  ) %>%
+  mutate(Primary_Energy = Primary_Energy / 10^9)  # Conversion en TWh
+
+# On Standardisee les données
+mlg_data <- mlg_data %>%
+  mutate(across(everything(), ~ (.-mean(.)) / sd(.), .names = "{col}"))
+
+# Détection et suppression des outliers via les scores Z
+mlg_data <- mlg_data %>%
+  filter(across(everything(), ~ abs((. - mean(.)) / sd(.)) <= 3))
+
+# Ajuster un modèle initial (le plus gros modèle) pour détecter les outliers via la distance de Cook
+initial_model <- lm(CO2_Emissions ~ Energy_Intensity + Primary_Energy + Renewable_Share + GDP_per_Capita + Low_Carbon_Electricity + Fossil_Fuel_Electricity, data = mlg_data)
+
+mlg_data <- mlg_data %>%
+  mutate(Cooks_Distance = cooks.distance(initial_model))
+
+# Seuil par défaut pour détecter les outliers (4/n)
+threshold <- 4 / nrow(mlg_data)
+
+# On enlève les observations avec une distance de Cook supérieure au seuil
+mlg_data <- mlg_data %>% filter(Cooks_Distance <= threshold)
+
+##Dans cette partie, on crée les modèles imbriqués pour comparer leurs performances par le critère AIC ensuite 
+
+# Créer les modèles imbriqués
+models <- list(
+  lm(CO2_Emissions ~ 1, data = mlg_data), 
+  lm(CO2_Emissions ~ Energy_Intensity, data = mlg_data),
+  lm(CO2_Emissions ~ Energy_Intensity + Primary_Energy, data = mlg_data),
+  lm(CO2_Emissions ~ Energy_Intensity + Primary_Energy + Renewable_Share, data = mlg_data),
+  lm(CO2_Emissions ~ Energy_Intensity + Primary_Energy + Renewable_Share + GDP_per_Capita, data = mlg_data),
+  lm(CO2_Emissions ~ Energy_Intensity + Primary_Energy + Renewable_Share + GDP_per_Capita + Low_Carbon_Electricity, data = mlg_data),
+  lm(CO2_Emissions ~ Energy_Intensity + Primary_Energy + Renewable_Share + GDP_per_Capita + Low_Carbon_Electricity + Fossil_Fuel_Electricity, data = mlg_data)
+)
+
+# Calculer les AIC pour chaque modèle
+aic_table <- data.frame(
+  Model = paste0("Modèle ", seq_along(models)),
+  AIC = sapply(models, AIC)
+)
+
+# Afficher la table des AIC
+kable(aic_table, format = "html", caption = "Critères AIC pour les modèles") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+
+# On sélectionne le meilleur modèle
+best_model <- models[[which.min(aic_table$AIC)]]
+
+best_model_summary <- summary(best_model)
+
+# Extraire le R² et le R² ajusté
+r_squared <- best_model_summary$r.squared
+adj_r_squared <- best_model_summary$adj.r.squared
+
+# Afficher les coefficients et p-values dans un tableau
+
+coef_table <- as.data.frame(best_model_summary$coefficients)
+colnames(coef_table) <- c("Coefficient", "Std. Error", "t-value", "p-value")
+coef_table <- coef_table %>% rownames_to_column("Variable")
+
+
+kable(coef_table, format = "html", caption = paste0(
+  "Résumé du meilleur modèle (R² : ", round(r_squared, 3),
+  ", R² ajusté : ", round(adj_r_squared, 3), ")"
+)) %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover", "condensed"))
+
+
+
+
+```
+
+On affiche les diagnostic plots
+
+```{r}
+# Graphes de diagnostic pour le meilleur modèle
+autoplot(best_model, which = 1:3, label.size = 3) +
+  theme_minimal()
+```
+
+Le test de Breusch-Pagan vient confirmer la non homoscédasticité des résidus
+
+```{r}
+bptest(best_model)
+```
+
+## PARTIE 4 : Effort des pays envers la validation des objectifs d’energies renouvelables
+
+### 4.1 :  Les énergies renouvelables par pays
+
+Création de la carte choroplèthe de la part des énergies renouvelable dans la consommation finale d'énergie par pays:
+
+```{r}
+
+#On sélectionne les données sur l'année choisie (par défaut 2019)
+
+année <- 2019  
+
+renewable_data <- dataset %>%
+  filter(Year == année) %>%
+  select(Entity, Renewable_Share = Renewable.energy.share.in.the.total.final.energy.consumption....)
+
+#Carte du monde
+world_map_renewable <- getMap()
+
+#On fusionne les données avec la carte
+merged_data_renewable <- joinCountryData2Map(
+  renewable_data, 
+  joinCode = "NAME", 
+  nameJoinColumn = "Entity", 
+  verbose = TRUE
+)
+
+# Créer la carte choroplèthe
+mapCountryData(
+  merged_data_renewable, 
+  nameColumnToPlot = "Renewable_Share",  
+  mapTitle = paste("Carte choroplèthe de la part d'énergie renouvelable par pays en", année),
+  colourPalette = c("firebrick","darkorange","yellow","yellowgreen","darkgreen"),  
+  oceanCol = "lightblue",     
+  missingCountryCol = "white" # Couleur pour les pays sans données
+)
+
+
+```
+
+Nous pouvons également nous baser sur un diagramme de bârres groupées pour visualiser les différences entre les continents: 
+```{r}
+
+# Calculer la moyenne de Renewable.energy.share.in.the.total.final.energy.consumption.... par continent et par année
+mean_renewable_by_year_continent <- dataset %>%
+  group_by(Year, Continent) %>%
+  summarise(Mean_Renewable_Share = mean(Renewable.energy.share.in.the.total.final.energy.consumption...., na.rm = TRUE))
+
+# Créer le diagramme de barres groupées 
+ggplot(mean_renewable_by_year_continent, aes(x = Year, y = Mean_Renewable_Share, fill = Continent)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) + 
+  labs(
+    title = "Moyenne de la part d'énergie renouvelable par continent et par année",
+    x = "Année",
+    y = "Moyenne de la part d'énergie renouvelable (%)"
+  ) +
+  scale_x_continuous(breaks = unique(mean_renewable_by_year_continent$Year)) +  
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),  
+    legend.title = element_blank(),  
+    legend.position = "bottom"  # Place la légende en dessous
+  )
+
+
+```
+
+
+### 4.2 : Etude d'une possible relation entre les financements et les scores élevés des pays en voie de développement dans la part des énergies renouvelables dans la consommation finale:
+
+
+```{r}
+# Filtrer les données pour garder uniquement celles où 'Financial.flows.to.developing.countries..US...' est non nulle
+financial_data <- dataset %>%
+  filter(Financial.flows.to.developing.countries..US... != 0) %>%
+  select(
+    Renewable_Share = Renewable.energy.share.in.the.total.final.energy.consumption....,
+    Financial_Flows = Financial.flows.to.developing.countries..US...,  
+    GDP_Growth = gdp_per_capita,
+    Year= Year,
+    Entity=Entity
+  )
+financial_data <- na.omit(financial_data)
+
+# Normalisation des données
+financial_data <- financial_data %>%
+  mutate(
+    Renewable_Share = (Renewable_Share - mean(Renewable_Share, na.rm = TRUE)) / sd(Renewable_Share, na.rm = TRUE),
+    Financial_Flows = (Financial_Flows - mean(Financial_Flows, na.rm = TRUE)) / sd(Financial_Flows, na.rm = TRUE),
+    GDP_Growth = (GDP_Growth - mean(GDP_Growth, na.rm = TRUE)) / sd(GDP_Growth, na.rm = TRUE)
+  )
+
+
+# Conversion de 'Entity' en facteur (pays)
+financial_data$Entity <- as.factor(financial_data$Entity)
+
+# Régression linéaire multiple
+reg_model <- lm(Renewable_Share ~ Financial_Flows + log(GDP_Growth) + Year , data = financial_data)
+
+summary(reg_model)
+
+
+```
+
+```{r}
+# Visualisation des relations avec échelle logarithmique
+ggplot(financial_data, aes(x = Financial_Flows, y = Renewable_Share)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Relation entre Renewable Share et Financial Flows") +
+  scale_x_log10()   # Echelle logarithmique sur l'axe x
+
+ggplot(financial_data, aes(x = GDP_Growth, y = Renewable_Share)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Relation entre Renewable Share et GDP Growth") +
+  scale_x_log10()  # Echelle logarithmique sur l'axe x
+
+
+```
